@@ -1,0 +1,13 @@
+.lst-seo { --lst-accent:#635bff; }
+.lst-seo .lst-version { font-size:13px; font-weight:400; color:#646970; margin-left:8px; }
+.lst-seo .lst-panel { background:#fff; border:1px solid #dcdcde; padding:18px 22px; margin:16px 0; border-radius:6px; }
+.lst-seo .lst-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:16px 0; }
+.lst-seo .lst-grid .lst-panel { margin:0; }
+.lst-seo .lst-panel h2 { margin-top:0; }
+.lst-seo .button-primary { background:var(--lst-accent); border-color:var(--lst-accent); }
+.lst-seo .button-primary:hover { background:#4940fa; border-color:#4940fa; }
+.lst-seo .lst-url,.lst-seo pre { overflow-wrap:anywhere; white-space:pre-wrap; max-width:420px; }
+.lst-seo .lst-scroll { overflow-x:auto; margin-top:16px; }
+.lst-seo textarea { max-width:100%; }
+.lst-seo .nav-tab-wrapper { display:flex; flex-wrap:wrap; gap:3px; }
+.lst-seo .nav-tab { margin-left:0; }

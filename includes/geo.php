@@ -1,6 +1,6 @@
 <?php
 /** Public, curated llms.txt index. No filesystem writes or external requests. */
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class GEO {
     const MAX_TOTAL = 1000;
@@ -165,7 +165,7 @@ final class GEO {
             $pin_budget = min(self::MAX_PRIORITY,self::MAX_SCAN-$scanned);
             for ($offset=0;$offset<$pin_budget;$offset+=50) {
                 $size=min(50,$pin_budget-$offset);
-                $batch=self::query_ids(['post_type'=>$type,'numberposts'=>$size,'offset'=>$offset,'meta_key'=>'_lst_seo_geo_priority','meta_value'=>'1']);
+                $batch=self::query_ids(['post_type'=>$type,'numberposts'=>$size,'offset'=>$offset,'meta_key'=>'_lst_seo_geo_priority','meta_value'=>'1']); // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Find manually prioritized public content using plugin-owned metadata. ID-only batches of at most 50 within the candidate budget; optional candidate cache reduces repeat queries, but meta-value lookup can still be costly.
                 $scanned+=count($batch); $pinned=array_merge($pinned,$batch);
                 if (count($batch)<$size) { break; }
             }

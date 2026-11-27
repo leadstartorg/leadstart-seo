@@ -1,5 +1,5 @@
 <?php
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class Admin {
     const SLUG='leadstart-seo';
@@ -10,19 +10,81 @@ final class Admin {
     }
     public static function tabs(): array { return ['dashboard'=>'Dashboard','indexing'=>'Instant Indexing','analysis'=>'SEO Analysis','analytics'=>'Analytics','schema'=>'Schema','geo'=>'GEO','ai'=>'Content AI','history'=>'History','settings'=>'Settings']; }
     public static function url(string $tab='dashboard'): string { return admin_url('admin.php?page='.self::SLUG.($tab==='dashboard'?'':'-'.$tab)); }
-    public static function menu(): void { add_menu_page('Leadstart SEO','Leadstart SEO','manage_options',self::SLUG,[self::class,'page'],'dashicons-search'); foreach (self::tabs() as $k=>$label) { add_submenu_page(self::SLUG,$label,$label,'manage_options',$k==='dashboard'?self::SLUG:self::SLUG.'-'.$k,[self::class,'page']); } }
+    public static function menu(): void {
+        $dashboard=[self::class,'page'];
+        add_menu_page('Leadstart SEO','Leadstart SEO','manage_options',self::SLUG,$dashboard,'dashicons-search');
+        foreach (self::tabs() as $k=>$label) {
+            $callback=$k==='dashboard'?$dashboard:static function () use ($k) { self::page($k); };
+            add_submenu_page(self::SLUG,$label,$label,'manage_options',$k==='dashboard'?self::SLUG:self::SLUG.'-'.$k,$callback);
+        }
+    }
     public static function assets(string $hook): void { if (str_contains($hook,'leadstart-seo')) { wp_enqueue_style('lst-seo-admin',plugins_url('assets/admin.css',FILE),[],VERSION); } }
-    private static function text(string $key,string $default=''): string { return isset($_POST[$key]) && is_string($_POST[$key])?sanitize_text_field(wp_unslash($_POST[$key])):$default; }
-    // Raw structured input is passed only to field-specific JSON/credential/URL or textarea validators.
-    private static function raw(string $key): string { return isset($_POST[$key]) && is_string($_POST[$key])?wp_unslash($_POST[$key]):''; }
+    private static function text(string $key,string $default=''): string {
+        check_admin_referer('lst_seo_admin','lst_seo_admin_nonce');
+        return isset($_POST[$key]) && is_string($_POST[$key])?sanitize_text_field(wp_unslash($_POST[$key])):$default;
+    }
+    private static function textarea(string $key): string {
+        check_admin_referer('lst_seo_admin','lst_seo_admin_nonce');
+        return isset($_POST[$key]) && is_string($_POST[$key])?sanitize_textarea_field(wp_unslash($_POST[$key])):'';
+    }
+    private static function google_input() {
+        check_admin_referer('lst_seo_admin','lst_seo_admin_nonce');
+        if (!isset($_POST['google_json']) || !is_string($_POST['google_json'])) { return ''; }
+        // JSON and PEM must be decoded and validated before re-encoding; generic text sanitization would corrupt keys.
+        $raw=trim(wp_unslash($_POST['google_json'])); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Config::google_json() validates JSON, allowlists the OAuth endpoint, sanitizes the email and normalizes the RSA key with OpenSSL before re-encoding. Text sanitization would corrupt structured credentials.
+        if ($raw==='') { return ''; }
+        $validated=Config::google_json($raw);
+        if (is_wp_error($validated)) { return $validated; }
+        $json=wp_json_encode($validated,JSON_UNESCAPED_SLASHES);
+        return is_string($json)?$json:new \WP_Error('credential','Credential encoding failed.');
+    }
+    private static function bing_input() {
+        check_admin_referer('lst_seo_admin','lst_seo_admin_nonce');
+        if (!isset($_POST['bing_key']) || !is_string($_POST['bing_key'])) { return ''; }
+        $key=sanitize_text_field(wp_unslash($_POST['bing_key']));
+        if (($key==='' && !empty($_POST['bing_key'])) || ($key!=='' && !preg_match('/^[A-Za-z0-9_-]{8,256}$/D',$key))) { return new \WP_Error('credential','Invalid Bing key format.'); }
+        return $key;
+    }
+    private static function mapping_input(string $key) {
+        check_admin_referer('lst_seo_admin','lst_seo_admin_nonce');
+        // Mappings accept only simple ASCII public meta keys, not rich JSON content.
+        return Schema::mapping(isset($_POST[$key]) && is_string($_POST[$key])?sanitize_textarea_field(wp_unslash($_POST[$key])):'');
+    }
+    private static function urls_input() {
+        check_admin_referer('lst_seo_admin','lst_seo_admin_nonce');
+        // Split first: text sanitizers remove valid percent escapes from URLs.
+        // Config::url() validates each original URL and calls esc_url_raw() before enqueueing.
+        $raw=isset($_POST['urls']) && is_string($_POST['urls'])?wp_unslash($_POST['urls']):''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- The size- and count-limited list is split into individual URLs; Config::url() validates same-site HTTP(S) URLs and applies esc_url_raw() before any submission is queued. Preserve encoded URL characters.
+        if (strlen($raw)>210000) { return new \WP_Error('urls','Request too large.'); }
+        $urls=array_values(array_unique(array_filter(array_map('trim',preg_split('/\R/',$raw)?:[]))));
+        if (!$urls || count($urls)>100) { return new \WP_Error('urls','Enter 1–100 URLs.'); }
+        $valid=[]; $invalid=0;
+        foreach ($urls as $url) { $clean=Config::url($url); if ($clean==='') { $invalid++; } else { $valid[]=$clean; } }
+        return ['urls'=>$valid,'invalid'=>$invalid];
+    }
     private static function checked_input(string $key): bool { return self::text($key)==='1'; }
     private static function choices_input(string $key,array $allowed): array {
+        check_admin_referer('lst_seo_admin','lst_seo_admin_nonce');
         if (!isset($_POST[$key]) || !is_array($_POST[$key])) { return []; }
-        $values=array_map('sanitize_text_field',array_filter(wp_unslash($_POST[$key]),'is_string'));
+        // Unslash and sanitize the submitted array at the boundary; discard non-string shapes.
+        $values=map_deep(wp_unslash($_POST[$key]),'sanitize_text_field');
+        $values=array_filter($values,'is_string');
         return array_values(array_intersect($allowed,$values));
     }
-    private static function query(string $key,string $default=''): string { return isset($_GET[$key]) && is_string($_GET[$key])?sanitize_text_field(wp_unslash($_GET[$key])):$default; }
-    private static function form(string $op,string $tab): void { echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'"><input type="hidden" name="action" value="lst_seo"><input type="hidden" name="op" value="'.esc_attr($op).'"><input type="hidden" name="tab" value="'.esc_attr($tab).'">'; wp_nonce_field('lst_seo_'.$op); }
+    private static function history_page(): int {
+        if (!isset($_GET['pagenum'])) { return 1; }
+        check_admin_referer('lst_seo_history_page','lst_seo_history_nonce');
+        return is_string($_GET['pagenum'])?max(1,min(10000,absint(wp_unslash($_GET['pagenum'])))):1;
+    }
+    private static function history_url(int $page): string {
+        return add_query_arg(['pagenum'=>$page,'lst_seo_history_nonce'=>wp_create_nonce('lst_seo_history_page')],self::url('history'));
+    }
+    private static function analysis_id(): int {
+        if (!isset($_GET['post_id'])) { return 0; }
+        check_admin_referer('lst_seo_analyze','lst_seo_analysis_nonce');
+        return is_string($_GET['post_id'])?absint(wp_unslash($_GET['post_id'])):0;
+    }
+    private static function form(string $op,string $tab): void { echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'"><input type="hidden" name="action" value="lst_seo"><input type="hidden" name="op" value="'.esc_attr($op).'"><input type="hidden" name="tab" value="'.esc_attr($tab).'">'; wp_nonce_field('lst_seo_'.$op); wp_nonce_field('lst_seo_admin','lst_seo_admin_nonce',false); }
     private static function field(string $name,string $label,string $value='',string $type='text'): void { echo '<p><label for="lst-'.esc_attr($name).'">'.esc_html($label).'</label><br><input class="regular-text" id="lst-'.esc_attr($name).'" type="'.esc_attr($type).'" name="'.esc_attr($name).'" value="'.esc_attr($value).'"></p>'; }
     private static function check(string $name,string $label,bool $checked=false): void { echo '<p><label><input type="checkbox" name="'.esc_attr($name).'" value="1" '.checked($checked,true,false).'> '.esc_html($label).'</label></p>'; }
     private static function select(string $name,string $label,array $choices,string $value=''): void { echo '<p><label for="lst-'.esc_attr($name).'">'.esc_html($label).'</label><br><select id="lst-'.esc_attr($name).'" name="'.esc_attr($name).'">'; foreach ($choices as $k=>$v) { echo '<option value="'.esc_attr((string)$k).'" '.selected((string)$k,$value,false).'>'.esc_html($v).'</option>'; } echo '</select></p>'; }
@@ -30,9 +92,9 @@ final class Admin {
     private static function notice(string $message,string $type='info'): void { echo '<div class="notice notice-'.esc_attr($type).' inline"><p>'.esc_html($message).'</p></div>'; }
     private static function flash(string $tab,string $message,string $type='success',$data=null): void { set_transient('lst_seo_flash_'.get_current_user_id(),['message'=>$message,'type'=>$type,'data'=>$data],120); wp_safe_redirect(self::url($tab)); exit; }
     private static function post_types(): array { $types=get_post_types(['public'=>true],'objects'); unset($types['attachment']); return $types; }
-    public static function page(): void {
+    public static function page(string $tab='dashboard'): void {
         if (!current_user_can('manage_options')) { wp_die('Access denied.'); }
-        $page=self::query('page',self::SLUG); $tab=$page===self::SLUG?'dashboard':substr($page,strlen(self::SLUG)+1); if (!isset(self::tabs()[$tab])) { $tab='dashboard'; }
+        if (!isset(self::tabs()[$tab])) { $tab='dashboard'; }
         $flash=get_transient('lst_seo_flash_'.get_current_user_id()); delete_transient('lst_seo_flash_'.get_current_user_id());
         echo '<div class="wrap lst-seo"><h1>'.esc_html(self::tabs()[$tab]).' <span class="lst-version">Leadstart SEO '.esc_html(VERSION).'</span></h1><nav class="nav-tab-wrapper" aria-label="Leadstart SEO">'; foreach (self::tabs() as $k=>$name) { echo '<a class="nav-tab '.($k===$tab?'nav-tab-active':'').'" href="'.esc_url(self::url($k)).'">'.esc_html($name).'</a>'; } echo '</nav>';
         if (is_array($flash)) { self::notice($flash['message'],$flash['type']); if (is_array($flash['data']) && isset($flash['data']['headers'],$flash['data']['rows'])) { self::table($flash['data']['headers'],$flash['data']['rows']); } elseif (is_string($flash['data'])) { echo '<div class="lst-panel"><h2>Result</h2><textarea class="large-text" rows="12" readonly>'.esc_textarea($flash['data']).'</textarea></div>'; } }
@@ -65,18 +127,18 @@ final class Admin {
         self::end(__('Save GEO settings','leadstart-seo')); self::form('geo_clear','geo'); self::end(__('Clear GEO candidate cache','leadstart-seo')); echo '</div><div class="lst-panel"><h2>'.esc_html__('Serving and compatibility','leadstart-seo').'</h2><p>'.esc_html__('The document is rendered from current public content on request. Candidate IDs may be cached briefly; access checks and summaries are always fresh. Your web server must route llms.txt to WordPress. An existing static file or another generator may take precedence; this plugin never overwrites it.','leadstart-seo').'</p><p><a href="https://llmstxt.org/" target="_blank" rel="noopener noreferrer">'.esc_html__('Read the llms.txt proposal','leadstart-seo').'</a></p></div>';
     }
     private static function indexing(): void { echo '<div class="lst-panel"><p>One same-site URL per line, up to 100 per submission. Google updates require an eligible public post marked in its Leadstart SEO editor panel. IndexNow is for public changed URLs. Legacy Bing fallback is optional and does not bypass rate limits.</p>'; self::form('submit','indexing'); self::select('provider','Provider',['google'=>'Google Indexing / Inspection','indexnow'=>'IndexNow (optional Bing fallback)','bing'=>'Bing legacy direct']); self::select('request','Action',['update'=>'Publish / update','delete'=>'Notify removed URL','metadata'=>'Google notification metadata','inspect'=>'Google URL Inspection']); echo '<p><label for="lst-urls">URLs</label><br><textarea id="lst-urls" class="large-text" name="urls" rows="8" required></textarea></p>'; self::check('attest','For removed URLs: I verified removal/noindex and, for Google, prior eligibility. For unresolved IndexNow URLs: I verified public indexability.'); self::end('Queue URLs'); echo '</div>'; self::form('run','indexing'); self::end('Process next queue batch'); }
-    private static function history(): void { $page=max(1,min(10000,(int)self::query('pagenum','1'))); $jobs=Queue::query(['numberposts'=>50,'offset'=>($page-1)*50]); echo '<p>Completed history is retained for approximately 30 days. Unknown delivery is not automatically retried. A manual retry may resend an already accepted notification; inspect provider status first.</p>'; self::form('run','history'); self::end('Process next batch'); if (get_option(Queue::LOCK)==='locked' && (int)get_option(Queue::LOCK_TIME,0)<=time()-900) { self::form('unlock','history'); self::end('Release stale worker lock (confirm no worker is running)'); } echo '<table class="widefat striped"><thead><tr><th>URL</th><th>Provider / action</th><th>Status</th><th>Response</th><th>Attempts</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody>'; foreach ($jobs as $p) { $j=Queue::get($p->ID); if (!$j) { continue; } echo '<tr><td class="lst-url">'.esc_html($j['url']).'</td><td>'.esc_html($j['provider'].' / '.$j['action']).'</td><td>'.esc_html($j['status']).'</td><td>'.esc_html($j['result']); if (!empty($j['details'])) { echo '<details><summary>Details</summary><pre>'.esc_html(wp_json_encode($j['details'],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)).'</pre></details>'; } echo '</td><td>'.esc_html((string)$j['attempts']).'</td><td>'.esc_html(gmdate('Y-m-d H:i',$j['created'])).'</td><td>'; if (in_array($j['status'],['failed','unknown'],true)) { self::form('retry','history'); echo '<input type="hidden" name="id" value="'.esc_attr((string)$p->ID).'">'; submit_button('Retry','secondary','submit',false); echo '</form>'; } echo '</td></tr>'; } echo '</tbody></table><p>'; if ($page>1) { echo '<a class="button" href="'.esc_url(add_query_arg('pagenum',$page-1,self::url('history'))).'">Previous</a> '; } if (count($jobs)===50) { echo '<a class="button" href="'.esc_url(add_query_arg('pagenum',$page+1,self::url('history'))).'">Next</a>'; } echo '</p>'; }
-    private static function analysis(): void { echo '<div class="lst-panel"><p>Local analysis of saved content. Scores are heuristics, not ranking scores. Editor analysis is also available on public post types.</p><form method="get"><input type="hidden" name="page" value="leadstart-seo-analysis">'; self::field('post_id','Post ID',self::query('post_id'),'number'); submit_button('Analyze'); echo '</form>'; $id=(int)self::query('post_id'); if ($id && current_user_can('edit_post',$id) && ($p=get_post($id)) && $p->post_type!==Queue::TYPE) { echo '<h2>'.esc_html(get_the_title($p)).'</h2>'; SEO::render_analysis(SEO::analyze($p)); } echo '</div>'; }
+    private static function history(): void { $page=self::history_page(); $jobs=Queue::query(['numberposts'=>50,'offset'=>($page-1)*50]); echo '<p>Completed history is retained for approximately 30 days. Unknown delivery is not automatically retried. A manual retry may resend an already accepted notification; inspect provider status first.</p>'; self::form('run','history'); self::end('Process next batch'); if (get_option(Queue::LOCK)==='locked' && (int)get_option(Queue::LOCK_TIME,0)<=time()-900) { self::form('unlock','history'); self::end('Release stale worker lock (confirm no worker is running)'); } echo '<table class="widefat striped"><thead><tr><th>URL</th><th>Provider / action</th><th>Status</th><th>Response</th><th>Attempts</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody>'; foreach ($jobs as $p) { $j=Queue::get($p->ID); if (!$j) { continue; } echo '<tr><td class="lst-url">'.esc_html($j['url']).'</td><td>'.esc_html($j['provider'].' / '.$j['action']).'</td><td>'.esc_html($j['status']).'</td><td>'.esc_html($j['result']); if (!empty($j['details'])) { echo '<details><summary>Details</summary><pre>'.esc_html(wp_json_encode($j['details'],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)).'</pre></details>'; } echo '</td><td>'.esc_html((string)$j['attempts']).'</td><td>'.esc_html(gmdate('Y-m-d H:i',$j['created'])).'</td><td>'; if (in_array($j['status'],['failed','unknown'],true)) { self::form('retry','history'); echo '<input type="hidden" name="id" value="'.esc_attr((string)$p->ID).'">'; submit_button('Retry','secondary','submit',false); echo '</form>'; } echo '</td></tr>'; } echo '</tbody></table><p>'; if ($page>1) { echo '<a class="button" href="'.esc_url(self::history_url($page-1)).'">Previous</a> '; } if (count($jobs)===50) { echo '<a class="button" href="'.esc_url(self::history_url($page+1)).'">Next</a>'; } echo '</p>'; }
+    private static function analysis(): void { $id=self::analysis_id(); echo '<div class="lst-panel"><p>Local analysis of saved content. Scores are heuristics, not ranking scores. Editor analysis is also available on public post types.</p><form method="get"><input type="hidden" name="page" value="leadstart-seo-analysis">'; wp_nonce_field('lst_seo_analyze','lst_seo_analysis_nonce',false); self::field('post_id','Post ID',$id?(string)$id:'','number'); submit_button('Analyze'); echo '</form>'; if ($id && current_user_can('edit_post',$id) && ($p=get_post($id)) && $p->post_type!==Queue::TYPE) { echo '<h2>'.esc_html(get_the_title($p)).'</h2>'; SEO::render_analysis(SEO::analyze($p)); } echo '</div>'; }
     private static function schema(): void { $s=Config::get(); echo '<div class="lst-panel"><p>Map post types to JSON-LD types. Additional factual fields and per-post overrides are available in the editor. Invalid or incomplete required fields suppress output. Enable output separately in Settings.</p>'; self::form('schema','schema'); foreach (self::post_types() as $k=>$obj) { $choices=[''=>'None']+array_combine(Schema::types(),Schema::types()); self::select('schema_'.$k,$obj->label,$choices,$s['schema_map'][$k]??''); } echo '<h3>Public custom field mappings</h3><p>Optional JSON object per post type, e.g. {&quot;startDate&quot;:&quot;public_event_start&quot;}. Values are public post-meta keys. Only map fields intended for public disclosure. Protected or sensitive-looking keys are rejected. Nested structured data belongs in the per-post JSON editor.</p>'; foreach (self::post_types() as $k=>$obj) { echo '<p><label>'.esc_html($obj->label).' <textarea class="large-text" rows="2" name="'.esc_attr('fields_'.$k).'">'.esc_textarea(empty($s['field_map'][$k])?'':wp_json_encode($s['field_map'][$k])).'</textarea></label></p>'; } self::check('defaults','Use suggested mappings for post types instead of selected values'); self::end('Save schema mappings'); echo '</div>'; }
     private static function analytics(): void { echo '<div class="lst-panel"><p>Reporting only. No new analytics tags, tracking scripts or cookies. Site Kit can remain active. All Time is limited by each API and the configured report start; grouped reports return up to 50 rows.</p>'; self::form('report','analytics'); self::select('report_provider','Source',['gsc'=>'Google Search Console','ga'=>'Google Analytics 4']); self::select('dimension','Report',['total'=>'Totals','date'=>'Daily rows','query'=>'GSC: Queries','page'=>'GSC: Pages','country'=>'Country','device'=>'GSC: Device','sitemaps'=>'GSC: Sitemap status','sessionDefaultChannelGroup'=>'GA4: Acquisition','landingPage'=>'GA4: Landing pages','city'=>'GA4: Cities','deviceCategory'=>'GA4: Devices','organic'=>'GA4: Organic search']); self::select('period','Period',['all'=>'All Time (available)','yearly'=>'Last 365 days','quarterly'=>'Last 90 days','monthly'=>'Last 30 days','weekly'=>'Last 7 days','daily'=>'Today','custom'=>'Custom'],'all'); self::field('start','Custom start','','date'); self::field('end','Custom end','','date'); self::check('refresh','Refresh cached report'); self::end('Get report'); echo '</div>'; }
     private static function ai(): void { echo '<div class="lst-panel"><p>Uses the WordPress native AI Client and configured Connectors. No Leadstart account is required. The text and selected post content are sent to the configured provider only when you request generation. Do not enter secrets or private personal data. Results are suggestions, not automatically saved.</p>'; self::form('ai','ai'); self::select('task','Task',AI::tasks()); self::field('post_id','Optional saved post ID','','number'); self::field('attachment_id','Optional local image attachment ID (alt text, max 4 MB)','','number'); echo '<p><label for="lst-ai-text">Input, question, visual description, or aggregate metrics</label><textarea id="lst-ai-text" name="text" class="large-text" rows="8"></textarea></p>'; self::check('consent','I authorize this content to be sent to the configured AI provider.'); self::end('Generate suggestion'); echo '</div>'; }
     private static function table(array $headers,array $rows): void { echo '<div class="lst-scroll"><table class="widefat striped"><thead><tr>'; foreach ($headers as $h) { echo '<th>'.esc_html((string)$h).'</th>'; } echo '</tr></thead><tbody>'; foreach ($rows as $row) { echo '<tr>'; foreach ($row as $v) { echo '<td>'.esc_html(is_scalar($v)?(string)$v:'').'</td>'; } echo '</tr>'; } echo '</tbody></table></div>'; if (!$rows) { echo '<p>No rows returned for this report.</p>'; } }
     public static function handle(): void {
         $method=isset($_SERVER['REQUEST_METHOD']) && is_string($_SERVER['REQUEST_METHOD'])?sanitize_text_field(wp_unslash($_SERVER['REQUEST_METHOD'])):'';
-        if (!current_user_can('manage_options') || $method!=='POST') { wp_die('Access denied.','',['response'=>403]); } $op=self::text('op'); $tab=self::text('tab','dashboard'); if (!isset(self::tabs()[$tab])) { $tab='dashboard'; } check_admin_referer('lst_seo_'.$op); $s=Config::get();
+        if (!current_user_can('manage_options') || $method!=='POST') { wp_die('Access denied.','',['response'=>403]); } check_admin_referer('lst_seo_admin','lst_seo_admin_nonce'); $op=self::text('op'); $tab=self::text('tab','dashboard'); if (!isset(self::tabs()[$tab])) { $tab='dashboard'; } check_admin_referer('lst_seo_'.$op); $s=Config::get();
         switch ($op) {
             case 'credentials':
-                $raw=trim(self::raw('google_json')); $bing=trim(self::raw('bing_key')); if ($raw!=='' && is_wp_error($v=Config::google_json($raw))) { self::flash($tab,$v->get_error_message(),'error'); } if ($bing!=='' && !preg_match('/^[A-Za-z0-9_-]{8,256}$/D',$bing)) { self::flash($tab,'Invalid Bing key format.','error'); }
+                $raw=self::google_input(); $bing=self::bing_input(); foreach ([$raw,$bing] as $credential) { if (is_wp_error($credential)) { self::flash($tab,$credential->get_error_message(),'error'); } }
                 foreach (['google_json'=>[$raw,self::checked_input('clear_google')],'bing_key'=>[$bing,self::checked_input('clear_bing')]] as $name=>$entry) { if ($entry[0]!=='' || $entry[1]) { $r=Config::set_secret($name,$entry[1]?'':$entry[0]); if (is_wp_error($r)) { self::flash($tab,$r->get_error_message(),'error'); } } } self::flash($tab,'Credential settings saved.'); break;
             case 'settings':
                 foreach (['indexnow','bing_fallback','meta','schema','ai','purge','use_excerpt'] as $k) { $s[$k]=self::checked_input($k); } $key=self::text('index_key'); if (!$key && $s['indexnow']) { $key=bin2hex(random_bytes(16)); } if ($key && !preg_match('/^[A-Za-z0-9-]{8,128}$/D',$key)) { self::flash($tab,'Invalid IndexNow key.','error'); } $s['index_key']=$key;
@@ -91,16 +153,16 @@ final class Admin {
                 $s['geo_types']=self::choices_input('geo_types',array_keys(GEO::types()));
                 $s['geo_limit']=max(1,min(200,(int)self::text('geo_limit','50')));
                 $s['geo_title']=wp_html_excerpt(self::text('geo_title'),200,'');
-                $s['geo_description']=wp_html_excerpt(sanitize_textarea_field(self::raw('geo_description')),500,'');
+                $s['geo_description']=wp_html_excerpt(self::textarea('geo_description'),500,'');
                 update_option(Config::OPTION,$s,false); GEO::clear_cache(); self::flash($tab,__('GEO settings saved.','leadstart-seo')); break;
             case 'geo_clear': GEO::clear_cache(); self::flash($tab,__('GEO candidate cache cleared.','leadstart-seo')); break;
-            case 'schema': $map=[]; $fields=[]; foreach (self::post_types() as $k=>$obj) { $v=self::checked_input('defaults')?(Schema::defaults()[$k]??''):self::text('schema_'.$k); if (in_array($v,Schema::types(),true)) { $map[$k]=$v; } $f=Schema::mapping(self::raw('fields_'.$k)); if (is_wp_error($f)) { self::flash($tab,$obj->label.': '.$f->get_error_message(),'error'); } if ($f) { $fields[$k]=$f; } } $s['schema_map']=$map; $s['field_map']=$fields; update_option(Config::OPTION,$s,false); self::flash($tab,'Schema mapping saved.'); break;
-            case 'submit': $raw=self::raw('urls'); if (strlen($raw)>210000) { self::flash($tab,'Request too large.','error'); } $urls=array_values(array_unique(array_filter(array_map('trim',preg_split('/\R/',$raw)?:[])))); if (!$urls || count($urls)>100) { self::flash($tab,'Enter 1–100 URLs.','error'); } $count=0;$errors=[]; foreach ($urls as $url) { $r=Queue::enqueue(self::text('provider'),self::text('request'),$url,0,self::checked_input('attest'),true); if (is_wp_error($r)) { $errors[]=$r->get_error_message(); } else { $count++; } } self::flash($tab,$count.' queued; '.count($errors).' rejected. '.implode(' ',array_unique($errors)),$errors?'warning':'success'); break;
+            case 'schema': $map=[]; $fields=[]; foreach (self::post_types() as $k=>$obj) { $v=self::checked_input('defaults')?(Schema::defaults()[$k]??''):self::text('schema_'.$k); if (in_array($v,Schema::types(),true)) { $map[$k]=$v; } $f=self::mapping_input('fields_'.$k); if (is_wp_error($f)) { self::flash($tab,$obj->label.': '.$f->get_error_message(),'error'); } if ($f) { $fields[$k]=$f; } } $s['schema_map']=$map; $s['field_map']=$fields; update_option(Config::OPTION,$s,false); self::flash($tab,'Schema mapping saved.'); break;
+            case 'submit': $input=self::urls_input(); if (is_wp_error($input)) { self::flash($tab,$input->get_error_message(),'error'); } $count=0;$errors=array_fill(0,$input['invalid'],'Invalid URL, provider or action.'); foreach ($input['urls'] as $url) { $r=Queue::enqueue(self::text('provider'),self::text('request'),$url,0,self::checked_input('attest'),true); if (is_wp_error($r)) { $errors[]=$r->get_error_message(); } else { $count++; } } self::flash($tab,$count.' queued; '.count($errors).' rejected. '.implode(' ',array_unique($errors)),$errors?'warning':'success'); break;
             case 'run': Queue::work(); self::flash($tab,'Queue worker invoked. See History for results.'); break;
             case 'unlock': $ok=Queue::unlock(); self::flash($tab,$ok?'Stale lock released. Review unknown delivery records.':'No stale lock available.',$ok?'success':'error'); break;
             case 'retry': $ok=Queue::retry((int)self::text('id')); self::flash($tab,$ok?'Retry queued.':'Unable to retry.',$ok?'success':'error'); break;
             case 'report': $p=self::text('report_provider'); $d=self::text('dimension'); $range=Reports::range(self::text('period'),self::text('start'),self::text('end')); $r=Reports::get($p,$d,$range,self::checked_input('refresh')); if ($r['code']!==200 || !is_array($r['data'])) { self::flash($tab,'Report failed: '.$r['message'],'error'); } [$headers,$rows]=Reports::table($p,$d,$r); self::flash($tab,'Report returned. '.implode(' to ',$r['range']??$range),'success',['headers'=>$headers,'rows'=>$rows]); break;
-            case 'ai': if (!self::checked_input('consent')) { self::flash($tab,'Consent is required.','error'); } $r=AI::run(self::text('task'),sanitize_textarea_field(self::raw('text')),(int)self::text('post_id'),(int)self::text('attachment_id')); if (is_wp_error($r)) { self::flash($tab,$r->get_error_message(),'error'); } self::flash($tab,'AI suggestion generated. Review before using.','success',$r); break;
+            case 'ai': if (!self::checked_input('consent')) { self::flash($tab,'Consent is required.','error'); } $r=AI::run(self::text('task'),self::textarea('text'),(int)self::text('post_id'),(int)self::text('attachment_id')); if (is_wp_error($r)) { self::flash($tab,$r->get_error_message(),'error'); } self::flash($tab,'AI suggestion generated. Review before using.','success',$r); break;
             case 'test': $test=self::text('test'); if ($test==='google') { $t=API::token(API::INDEX_SCOPE); self::flash($tab,is_wp_error($t)?$t->get_error_message():'OAuth authentication succeeded (not proof of indexing permission).',is_wp_error($t)?'error':'success'); }
                 if ($test==='indexnow') { $response=wp_safe_remote_get(API::key_url(),['timeout'=>10,'redirection'=>0,'sslverify'=>true,'limit_response_size'=>256]); $ok=!is_wp_error($response) && wp_remote_retrieve_response_code($response)===200 && trim(wp_remote_retrieve_body($response))===$s['index_key'] && $s['index_key']!==''; self::flash($tab,$ok?'Public key file is reachable and matches.':'Key verification failed. Check the public text file.',$ok?'success':'error'); }
                 if ($test==='bing') { $r=API::bing_quota(); self::flash($tab,'Bing quota: '.$r['message'],$r['code']===200?'success':'error',$r['code']===200?wp_json_encode($r['data'],JSON_PRETTY_PRINT):null); }

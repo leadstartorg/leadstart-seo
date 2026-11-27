@@ -1,5 +1,5 @@
 <?php
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class Schema {
     public static function types(): array { return ['WebPage','WebSite','Article','BlogPosting','NewsArticle','Organization','Person','JobPosting','Event','Place','LocalBusiness','Product','Offer','Service','VideoObject','BroadcastEvent','BreadcrumbList','FAQPage','ItemList','ProfilePage']; }

@@ -1,5 +1,5 @@
 <?php
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class API {
     const INDEX_SCOPE='https://www.googleapis.com/auth/indexing';

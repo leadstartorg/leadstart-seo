@@ -1,5 +1,5 @@
 <?php
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class Reports {
     public static function range(string $period,string $start='',string $end=''): array {

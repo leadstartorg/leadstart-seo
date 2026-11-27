@@ -1,5 +1,5 @@
 <?php
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class Queue {
     const TYPE='lst_seo_job';
@@ -52,7 +52,11 @@ final class Queue {
         if (in_array($p->post_type,$s['google_auto'],true) && get_post_meta($p->ID,'_lst_seo_google_eligible',true)==='1') { self::enqueue('google','delete',$url,$p->ID,true); }
         if ($s['indexnow'] && in_array($p->post_type,$s['indexnow_auto'],true)) { self::enqueue('indexnow','delete',$url,$p->ID,true); }
     }
-    public static function query(array $args=[]): array { return get_posts(array_replace(['post_type'=>self::TYPE,'post_status'=>'private','numberposts'=>50,'orderby'=>'ID','order'=>'DESC','suppress_filters'=>true],$args)); }
+    public static function query(array $args=[]): array {
+        $query=array_replace(['numberposts'=>50,'orderby'=>'ID','order'=>'DESC','no_found_rows'=>true],$args,['post_type'=>self::TYPE,'post_status'=>'private','suppress_filters'=>false]);
+        // A third-party query filter must never make unrelated posts eligible for queue processing or cleanup.
+        return array_values(array_filter(get_posts($query),static fn($p)=>$p instanceof \WP_Post && $p->post_type===self::TYPE && $p->post_status==='private'));
+    }
     public static function get(int $id): array { return get_post_type($id)===self::TYPE?(array)get_post_meta($id,'_lst_seo_job',true):[]; }
     private static function save(int $id,array $j): void { update_post_meta($id,'_lst_seo_job',$j); update_post_meta($id,'_lst_seo_status',$j['status']); update_post_meta($id,'_lst_seo_due',$j['due']); update_post_meta($id,'_lst_seo_finished',$j['finished']); }
     public static function retry(int $id): bool { $j=self::get($id); if (!in_array($j['status']??'',['failed','unknown'],true)) { return false; } return !is_wp_error(self::enqueue($j['provider'],$j['action'],$j['url'],(int)$j['post'],(bool)$j['attest'],true)); }
@@ -88,7 +92,7 @@ final class Queue {
         if (!add_option(self::LOCK,'locked','',false)) { return; }
         update_option(self::LOCK_TIME,$now,false);
         try {
-            $jobs=self::query(['numberposts'=>2,'orderby'=>'ID','order'=>'ASC','meta_query'=>[['key'=>'_lst_seo_status','value'=>'pending'],['key'=>'_lst_seo_due','value'=>$now,'compare'=>'<=','type'=>'NUMERIC']]]);
+            $jobs=self::query(['numberposts'=>2,'orderby'=>'ID','order'=>'ASC','meta_query'=>[['key'=>'_lst_seo_status','value'=>'pending'],['key'=>'_lst_seo_due','value'=>$now,'compare'=>'<=','type'=>'NUMERIC']]]); // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Find due pending records in the plugin-private queue post type; process at most two per worker run under the worker lock. Meta joins can still incur a cost.
             foreach ($jobs as $p) {
                 $j=self::get($p->ID); if (($j['status']??'')!=='pending') { continue; }
                 // Reserve before I/O: a killed worker leaves a visible unknown state, not an invisible duplicate.
@@ -101,8 +105,8 @@ final class Queue {
                 self::save($p->ID,$j);
             }
             // Bounded retention for terminal records. Pending and unknown requests are never pruned automatically.
-            foreach (self::query(['numberposts'=>20,'meta_query'=>[['key'=>'_lst_seo_status','value'=>['accepted','received','failed'],'compare'=>'IN'],['key'=>'_lst_seo_finished','value'=>time()-30*DAY_IN_SECONDS,'compare'=>'<','type'=>'NUMERIC']]]) as $p) { wp_delete_post($p->ID,true); }
-            if (count($jobs)===2) { self::schedule(15); } elseif (self::query(['numberposts'=>1,'meta_key'=>'_lst_seo_status','meta_value'=>'pending'])) { self::schedule(300); }
+            foreach (self::query(['numberposts'=>20,'meta_query'=>[['key'=>'_lst_seo_status','value'=>['accepted','received','failed'],'compare'=>'IN'],['key'=>'_lst_seo_finished','value'=>time()-30*DAY_IN_SECONDS,'compare'=>'<','type'=>'NUMERIC']]]) as $p) { wp_delete_post($p->ID,true); } // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Retention cleanup is limited to terminal records of the plugin-private queue post type, at most 20 per worker run; pending and unknown records are excluded.
+            if (count($jobs)===2) { self::schedule(15); } elseif (self::query(['numberposts'=>1,'meta_key'=>'_lst_seo_status','meta_value'=>'pending'])) { self::schedule(300); } // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Check whether the plugin-private queue has any pending record to schedule another worker; at most one result, no found rows.
         } finally { delete_option(self::LOCK_TIME); delete_option(self::LOCK); }
     }
     public static function unlock(): bool { if (get_option(self::LOCK)!=='locked' || (int)get_option(self::LOCK_TIME,0)>time()-900) { return false; } delete_option(self::LOCK_TIME); delete_option(self::LOCK); return true; }

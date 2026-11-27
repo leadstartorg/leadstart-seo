@@ -1,5 +1,5 @@
 <?php
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class Config {
     const OPTION = 'lst_seo_settings';
@@ -39,9 +39,10 @@ final class Config {
         if (!is_array($v) || ($v['type']??'')!=='service_account' || !is_string($v['client_email']??null) || !is_email($v['client_email']) || !is_string($v['private_key']??null) || !in_array($v['token_uri']??'', ['https://oauth2.googleapis.com/token','https://accounts.google.com/o/oauth2/token'],true)) { return new \WP_Error('credential','Expected a Google service account JSON with a supported token endpoint.'); }
         $key=openssl_pkey_get_private($v['private_key']); $details=$key?openssl_pkey_get_details($key):false;
         if (!$details || $details['type']!==OPENSSL_KEYTYPE_RSA || $details['bits']<2048) { return new \WP_Error('credential','Expected a valid RSA private key (at least 2048 bits).'); }
-        // Store only validated fields required by the OAuth implementation. PEM bytes must not be text-sanitized.
+        // Store only validated fields required by OAuth. Export the parsed RSA key as normalized PEM.
+        $pem=''; if (!openssl_pkey_export($key,$pem) || $pem==='') { return new \WP_Error('credential','Private key normalization failed.'); }
         $email=sanitize_email($v['client_email']); if ($email!==$v['client_email']) { return new \WP_Error('credential','Invalid service account email.'); }
-        return ['type'=>'service_account','client_email'=>$email,'private_key'=>$v['private_key'],'token_uri'=>'https://oauth2.googleapis.com/token'];
+        return ['type'=>'service_account','client_email'=>$email,'private_key'=>$pem,'token_uri'=>'https://oauth2.googleapis.com/token'];
     }
     public static function url(string $url): string {
         $url=trim($url); if (strlen($url)>2048 || preg_match('/[\x00-\x20\x7f\\\\]/',$url)) { return ''; }

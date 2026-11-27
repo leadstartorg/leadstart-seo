@@ -1,5 +1,5 @@
 <?php
-namespace Leadstart\SEO;
+namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class SEO {
     public static function boot(): void {
@@ -102,17 +102,18 @@ final class SEO {
         if (wp_is_post_revision($id) || wp_is_post_autosave($id) || !current_user_can('edit_post',$id) || !isset($_POST['lst_seo_meta_nonce']) || !is_string($_POST['lst_seo_meta_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['lst_seo_meta_nonce'])),'lst_seo_meta')) { return; }
         foreach (['title','description','keyword','canonical','schema_type','schema_fields'] as $k) {
             if (!isset($_POST['lst_seo_'.$k]) || !is_string($_POST['lst_seo_'.$k])) { continue; }
-            $raw=wp_unslash($_POST['lst_seo_'.$k]);
             if ($k==='schema_fields') {
-                $v=Schema::clean_json($raw,Schema::type($id));
+                // JSON must retain its structure and permitted JobPosting HTML.
+                // clean_json() decodes it, sanitizes individual values using native WordPress functions, then re-encodes it.
+                $v=Schema::clean_json(wp_unslash($_POST['lst_seo_'.$k]),Schema::type($id)); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Schema::clean_json() bounds and decodes the JSON, recursively validates and sanitizes properties with native WordPress functions, and re-encodes only cleaned values before saving.
                 if (is_wp_error($v)) {
                     set_transient('lst_seo_schema_error_'.get_current_user_id(),$id,120);
                     continue;
                 }
             }
-            elseif ($k==='canonical') { $v=Config::url($raw); if ($raw!=='' && !$v) { continue; } }
-            elseif ($k==='schema_type') { $candidate=sanitize_text_field($raw); if (!in_array($candidate,array_merge(['','none'],Schema::types()),true)) { continue; } $v=$candidate; }
-            else { $v=substr(sanitize_text_field($raw),0,1000); }
+            elseif ($k==='canonical') { $url=esc_url_raw(wp_unslash($_POST['lst_seo_'.$k]),['http','https']); $v=Config::url($url); if (!empty($_POST['lst_seo_'.$k]) && !$v) { continue; } }
+            elseif ($k==='schema_type') { $candidate=sanitize_text_field(wp_unslash($_POST['lst_seo_'.$k])); if (!in_array($candidate,array_merge(['','none'],Schema::types()),true)) { continue; } $v=$candidate; }
+            else { $v=substr(sanitize_text_field(wp_unslash($_POST['lst_seo_'.$k])),0,1000); }
             update_post_meta($id,'_lst_seo_'.$k,wp_slash($v));
         }
         foreach (['noindex','google_eligible','geo_exclude','geo_priority'] as $k) { update_post_meta($id,'_lst_seo_'.$k,isset($_POST['lst_seo_'.$k]) && is_string($_POST['lst_seo_'.$k]) && sanitize_text_field(wp_unslash($_POST['lst_seo_'.$k]))==='1'?'1':'0'); }
@@ -134,7 +135,7 @@ final class SEO {
             for ($i=1;$i<=6;$i++) { $headings[$i]=$dom->getElementsByTagName('h'.$i)->length; }
         }
         $canonical=(string)get_post_meta($p->ID,'_lst_seo_canonical',true); $custom_title=(string)get_post_meta($p->ID,'_lst_seo_title',true); $custom_desc=(string)get_post_meta($p->ID,'_lst_seo_description',true);
-        $dup=static function ($key,$value) use ($p) { if ($value==='') { return null; } return !get_posts(['post_type'=>get_post_types(['public'=>true]),'post_status'=>'publish','numberposts'=>1,'fields'=>'ids','post__not_in'=>[$p->ID],'meta_key'=>$key,'meta_value'=>$value,'no_found_rows'=>true]); };
+        $dup=static function ($key,$value) use ($p) { if ($value==='') { return null; } return !array_diff(array_map('intval',get_posts(['post_type'=>get_post_types(['public'=>true]),'post_status'=>'publish','numberposts'=>2,'fields'=>'ids','meta_key'=>$key,'meta_value'=>$value,'no_found_rows'=>true,'suppress_filters'=>false])),[(int)$p->ID]); }; // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Exact duplicate check of plugin-owned SEO metadata on published posts. ID-only, at most two results, no found rows; meta-value lookup can still be costly on large sites.
         $checks=['Title length (30–60 characters)'=>$len($title)>=30 && $len($title)<=60,'Description length (70–160 characters)'=>$len($d)>=70 && $len($d)<=160,'Focus keyword in title'=>$kw!==''?stripos($title,$kw)!==false:null,'Focus keyword in content'=>$kw!==''?stripos($content,$kw)!==false:null,'Public and locally indexable'=>self::indexable($p),'Content has text'=>count($words)>0,'At least one internal link'=>$headings!==[]?$internal>0:null,'Images with missing/empty alt reviewed'=>$headings!==[]?$missing===0:null,'No extra H1 in post body'=>$headings!==[]?$headings[1]===0:null,'Canonical points to this URL'=>$canonical?untrailingslashit($canonical)===untrailingslashit(get_permalink($p)):null,'Custom SEO title unique among Leadstart metadata'=>$dup('_lst_seo_title',$custom_title),'Custom description unique among Leadstart metadata'=>$dup('_lst_seo_description',$custom_desc)];
         $sentences=max(1,count(preg_split('/[.!?]+/u',$content,-1,PREG_SPLIT_NO_EMPTY)?:[])); $app=array_filter($checks,static fn($v)=>$v!==null);
         return ['score'=>count($app)?round(100*count(array_filter($app))/count($app)):0,'checks'=>$checks,'details'=>['Words'=>count($words),'Words per sentence (estimate)'=>round(count($words)/$sentences,1),'Internal links'=>$internal,'External links'=>$external,'Images'=>$images,'Missing/empty alt'=>$missing,'Headings'=>$headings,'Canonical'=>wp_get_canonical_url($p)?:'Unavailable','Schema type'=>Schema::type($p->ID)?:'None','Robots (local)' =>get_post_meta($p->ID,'_lst_seo_noindex',true)==='1'?'noindex':'No local noindex flag','Native sitemap enabled (not URL inclusion)' => function_exists('wp_sitemaps_get_server') && wp_sitemaps_get_server()->sitemaps_enabled(),'Permalink'=>get_permalink($p),'Open Graph output (configured, not rendered-page test)'=>Config::get()['meta'] && !self::competitor(),'Description source'=>self::description_source($p)]];

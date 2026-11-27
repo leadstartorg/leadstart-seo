@@ -1,0 +1,19 @@
+Leadstart SEO 1.0 — independent implementation, 2026-11-26.
+Original project reviewed: Instant Indexing for Google 1.1.22, author Rank Math,
+source archive commit 6e0acb11adc72709c29a2bb3d4c173629dfdb02d.
+Original plugin header: GPL v3; main class: GNU General Public License 3.0+;
+original readme: GPL-2.0+. Original authorship is acknowledged here. The new
+implementation uses GPL-3.0-or-later. The original application files, assets, SDKs and documentation
+are not bundled. The new plugin is not
+endorsed by or affiliated with Rank Math. Names referenced for compatibility
+and historical attribution are not branding or a service dependency.
+
+GEO functional reference reviewed: Website LLMs.txt 8.6.4, by Ryan Howard,
+GPL v2 or later. Its code, external service integration and assets are not
+bundled; the new GEO implementation follows the public llms.txt proposal
+(https://llmstxt.org/) using independent WordPress API code.
+
+GEO enhancement functional reference: Automattic Jetpack SEO source,
+https://github.com/Automattic/jetpack-seo/tree/trunk/src . Navigation, local
+caching and visibility concepts were reviewed; no Jetpack files or runtime
+service dependencies are included.

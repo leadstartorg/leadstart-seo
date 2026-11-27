@@ -113,7 +113,7 @@ final class SEO {
             }
             elseif ($k==='canonical') { $url=esc_url_raw(wp_unslash($_POST['lst_seo_'.$k]),['http','https']); $v=Config::url($url); if (!empty($_POST['lst_seo_'.$k]) && !$v) { continue; } }
             elseif ($k==='schema_type') { $candidate=sanitize_text_field(wp_unslash($_POST['lst_seo_'.$k])); if (!in_array($candidate,array_merge(['','none'],Schema::types()),true)) { continue; } $v=$candidate; }
-            else { $v=substr(sanitize_text_field(wp_unslash($_POST['lst_seo_'.$k])),0,1000); }
+            else { $v=mb_substr(sanitize_text_field(wp_unslash($_POST['lst_seo_'.$k])),0,1000,'UTF-8'); }
             update_post_meta($id,'_lst_seo_'.$k,wp_slash($v));
         }
         foreach (['noindex','google_eligible','geo_exclude','geo_priority'] as $k) { update_post_meta($id,'_lst_seo_'.$k,isset($_POST['lst_seo_'.$k]) && is_string($_POST['lst_seo_'.$k]) && sanitize_text_field(wp_unslash($_POST['lst_seo_'.$k]))==='1'?'1':'0'); }
@@ -127,12 +127,25 @@ final class SEO {
     }
     public static function analyze(\WP_Post $p): array {
         $title=(string)get_post_meta($p->ID,'_lst_seo_title',true)?:get_the_title($p); $d=self::description($p); $content=wp_strip_all_tags(strip_shortcodes($p->post_content)); $words=preg_split('/\s+/u',trim($content),-1,PREG_SPLIT_NO_EMPTY)?:[]; $kw=(string)get_post_meta($p->ID,'_lst_seo_keyword',true);
-        $len=static fn($v)=>function_exists('mb_strlen')?mb_strlen($v):strlen($v);
+        $len=static fn($v)=>mb_strlen($v,'UTF-8');
         $links=0;$internal=0;$external=0;$images=0;$missing=0;$headings=[];
-        if (class_exists('DOMDocument')) { $dom=new \DOMDocument(); $old=libxml_use_internal_errors(true); $dom->loadHTML('<?xml encoding="UTF-8">'.$p->post_content,LIBXML_NONET|LIBXML_NOERROR|LIBXML_NOWARNING); libxml_clear_errors(); libxml_use_internal_errors($old);
-            foreach ($dom->getElementsByTagName('a') as $a) { $href=$a->getAttribute('href'); if (!$href || str_starts_with($href,'#')) { continue; } $h=wp_parse_url($href,PHP_URL_HOST); if (!$h && !preg_match('/^[a-z][a-z0-9+.-]*:/i',$href) || $h && strtolower($h)===strtolower((string)wp_parse_url(home_url('/'),PHP_URL_HOST))) { $internal++; } elseif ($h) { $external++; } $links++; }
-            foreach ($dom->getElementsByTagName('img') as $img) { $images++; if (!$img->hasAttribute('alt') || trim($img->getAttribute('alt'))==='') { $missing++; } }
-            for ($i=1;$i<=6;$i++) { $headings[$i]=$dom->getElementsByTagName('h'.$i)->length; }
+        if (class_exists('WP_HTML_Tag_Processor')) {
+            $processor=new \WP_HTML_Tag_Processor($p->post_content);
+            $headings=array_fill(1,6,0);
+            $site_host=strtolower((string)wp_parse_url(home_url('/'),PHP_URL_HOST));
+            while ($processor->next_tag()) {
+                $tag=$processor->get_tag();
+                if ($tag==='A') {
+                    $href=$processor->get_attribute('href');
+                    if (!is_string($href) || !$href || str_starts_with($href,'#')) { continue; }
+                    $h=wp_parse_url($href,PHP_URL_HOST);
+                    if ((!$h && !preg_match('/^[a-z][a-z0-9+.-]*:/i',$href)) || ($h && strtolower($h)===$site_host)) { $internal++; } elseif ($h) { $external++; }
+                    $links++;
+                } elseif ($tag==='IMG') {
+                    $images++; $alt=$processor->get_attribute('alt');
+                    if (!is_string($alt) || trim($alt)==='') { $missing++; }
+                } elseif (is_string($tag) && preg_match('/^H([1-6])$/D',$tag,$match)) { $headings[(int)$match[1]]++; }
+            }
         }
         $canonical=(string)get_post_meta($p->ID,'_lst_seo_canonical',true); $custom_title=(string)get_post_meta($p->ID,'_lst_seo_title',true); $custom_desc=(string)get_post_meta($p->ID,'_lst_seo_description',true);
         $dup=static function ($key,$value) use ($p) { if ($value==='') { return null; } return !array_diff(array_map('intval',get_posts(['post_type'=>get_post_types(['public'=>true]),'post_status'=>'publish','numberposts'=>2,'fields'=>'ids','meta_key'=>$key,'meta_value'=>$value,'no_found_rows'=>true,'suppress_filters'=>false])),[(int)$p->ID]); }; // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Exact duplicate check of plugin-owned SEO metadata on published posts. ID-only, at most two results, no found rows; meta-value lookup can still be costly on large sites.

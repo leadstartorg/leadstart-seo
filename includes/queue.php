@@ -13,7 +13,29 @@ final class Queue {
         add_action('wp_trash_post',[self::class,'deleted'],10,1);
         add_action('lst_seo_tick',[self::class,'work']); add_action('lst_seo_run',[self::class,'work']);
     }
-    public static function register(): void { register_post_type(self::TYPE,['public'=>false,'show_ui'=>false,'show_in_rest'=>false,'can_export'=>false,'publicly_queryable'=>false,'exclude_from_search'=>true,'rewrite'=>false,'query_var'=>false,'supports'=>[],'map_meta_cap'=>true,'capabilities'=>array_fill_keys(['edit_post','read_post','delete_post','edit_posts','edit_others_posts','delete_posts','publish_posts','read_private_posts','create_posts'],'manage_options')]); }
+    public static function register(): void {
+        // All queue operations require the primitive manage_options capability.
+        // Meta-cap mapping must be disabled here: mapping edit_post/read_post/delete_post
+        // to manage_options would globally reinterpret that administrator capability.
+        register_post_type(self::TYPE,[
+            'public'=>false,
+            'show_ui'=>false,
+            'show_in_rest'=>false,
+            'can_export'=>false,
+            'publicly_queryable'=>false,
+            'exclude_from_search'=>true,
+            'rewrite'=>false,
+            'query_var'=>false,
+            'supports'=>[],
+            'map_meta_cap'=>false,
+            'capabilities'=>array_fill_keys([
+                'edit_post','read_post','delete_post','edit_posts','edit_others_posts',
+                'delete_posts','publish_posts','read_private_posts','create_posts',
+                'read','delete_private_posts','delete_published_posts','delete_others_posts',
+                'edit_private_posts','edit_published_posts',
+            ],'manage_options'),
+        ]);
+    }
     public static function serve_key(): void {
         $s=Config::get(); if (!$s['indexnow'] || $s['key_path'] || !preg_match('/^[A-Za-z0-9-]{8,128}$/D',$s['index_key'])) { return; }
         $uri=isset($_SERVER['REQUEST_URI']) && is_string($_SERVER['REQUEST_URI'])?esc_url_raw(wp_unslash($_SERVER['REQUEST_URI'])):'';
@@ -53,9 +75,23 @@ final class Queue {
         if ($s['indexnow'] && in_array($p->post_type,$s['indexnow_auto'],true)) { self::enqueue('indexnow','delete',$url,$p->ID,true); }
     }
     public static function query(array $args=[]): array {
-        $query=array_replace(['numberposts'=>50,'orderby'=>'ID','order'=>'DESC','no_found_rows'=>true],$args,['post_type'=>self::TYPE,'post_status'=>'private','suppress_filters'=>false]);
-        // A third-party query filter must never make unrelated posts eligible for queue processing or cleanup.
-        return array_values(array_filter(get_posts($query),static fn($p)=>$p instanceof \WP_Post && $p->post_type===self::TYPE && $p->post_status==='private'));
+        $limit=isset($args['numberposts'])?max(1,min(50,(int)$args['numberposts'])):50;
+        unset($args['numberposts']);
+        $query=array_replace(['orderby'=>'ID','order'=>'DESC'], $args, [
+            'posts_per_page'=>$limit,'post_type'=>self::TYPE,'post_status'=>'private',
+            'fields'=>'ids','no_found_rows'=>true,'suppress_filters'=>false,
+            'update_post_meta_cache'=>false,'update_post_term_cache'=>false,'ignore_sticky_posts'=>true,
+        ]);
+        $result=new \WP_Query($query);
+        // Do not trust third-party filters to restrict results to our private queue.
+        $ids=[];
+        foreach ($result->posts as $id) {
+            if (!is_int($id) && !(is_string($id) && ctype_digit($id))) { continue; }
+            $id=(int)$id;
+            if ($id>0 && get_post_type($id)===self::TYPE && get_post_status($id)==='private') { $ids[$id]=$id; }
+            if (count($ids)>=$limit) { break; }
+        }
+        return array_values($ids);
     }
     public static function get(int $id): array { return get_post_type($id)===self::TYPE?(array)get_post_meta($id,'_lst_seo_job',true):[]; }
     private static function save(int $id,array $j): void { update_post_meta($id,'_lst_seo_job',$j); update_post_meta($id,'_lst_seo_status',$j['status']); update_post_meta($id,'_lst_seo_due',$j['due']); update_post_meta($id,'_lst_seo_finished',$j['finished']); }
@@ -82,8 +118,21 @@ final class Queue {
         if ($s['bing_fallback'] && self::fallback_allowed($r['code']) && Config::secret('bing_key')) { $b=API::bing([$url]); $b['message']='IndexNow HTTP '.$r['code'].'; Bing fallback: '.$b['message']; $b['fallback']=true; if ($b['retry']) { $b['retry_provider']='bing'; } return $b; } return $r;
     }
     private static function removed_url(string $url): bool {
-        $r=wp_safe_remote_get($url,['timeout'=>8,'redirection'=>0,'sslverify'=>true,'limit_response_size'=>262144]); if (is_wp_error($r)) { return false; } $code=(int)wp_remote_retrieve_response_code($r); if (in_array($code,[404,410],true)) { return true; } if ($code!==200 || !class_exists('DOMDocument')) { return false; }
-        $dom=new \DOMDocument(); $old=libxml_use_internal_errors(true); try { $dom->loadHTML(wp_remote_retrieve_body($r),LIBXML_NONET|LIBXML_NOERROR|LIBXML_NOWARNING); foreach ($dom->getElementsByTagName('head') as $head) { foreach ($head->getElementsByTagName('meta') as $tag) { if (in_array(strtolower($tag->getAttribute('name')),['robots','googlebot'],true) && preg_match('/(?:^|[,\s])(?:noindex|none)(?:$|[,\s])/i',$tag->getAttribute('content'))) { return true; } } } } finally { libxml_clear_errors(); libxml_use_internal_errors($old); } return false;
+        $r=wp_safe_remote_get($url,['timeout'=>8,'redirection'=>0,'sslverify'=>true,'limit_response_size'=>262144]);
+        if (is_wp_error($r)) { return false; }
+        $code=(int)wp_remote_retrieve_response_code($r);
+        if (in_array($code,[404,410],true)) { return true; }
+        if ($code!==200 || !class_exists('WP_HTML_Processor') || !method_exists('WP_HTML_Processor','create_full_parser')) { return false; }
+        try {
+            $processor=\WP_HTML_Processor::create_full_parser(wp_remote_retrieve_body($r));
+            if (!$processor) { return false; }
+            while ($processor->next_tag('META')) {
+                if ($processor->get_breadcrumbs()!==['HTML','HEAD','META']) { continue; }
+                $name=$processor->get_attribute('name'); $content=$processor->get_attribute('content');
+                if (is_string($name) && is_string($content) && in_array(strtolower($name),['robots','googlebot'],true) && preg_match('/(?:^|[,\s])(?:noindex|none)(?:$|[,\s])/i',$content)) { return true; }
+            }
+        } catch (\Throwable $e) { return false; }
+        return false;
     }
     public static function result_status(array $r): string { if ($r['code']===202) { return 'received'; } return $r['code']>=200 && $r['code']<300?'accepted':'failed'; }
     public static function work(): void {
@@ -93,19 +142,19 @@ final class Queue {
         update_option(self::LOCK_TIME,$now,false);
         try {
             $jobs=self::query(['numberposts'=>2,'orderby'=>'ID','order'=>'ASC','meta_query'=>[['key'=>'_lst_seo_status','value'=>'pending'],['key'=>'_lst_seo_due','value'=>$now,'compare'=>'<=','type'=>'NUMERIC']]]); // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Find due pending records in the plugin-private queue post type; process at most two per worker run under the worker lock. Meta joins can still incur a cost.
-            foreach ($jobs as $p) {
-                $j=self::get($p->ID); if (($j['status']??'')!=='pending') { continue; }
+            foreach ($jobs as $id) {
+                $j=self::get($id); if (($j['status']??'')!=='pending' || (int)($j['due']??PHP_INT_MAX)>$now) { continue; }
                 // Reserve before I/O: a killed worker leaves a visible unknown state, not an invisible duplicate.
-                $j['status']='unknown'; $j['result']='Delivery unconfirmed (worker interrupted if this persists).'; $j['attempts']++; self::save($p->ID,$j);
+                $j['status']='unknown'; $j['result']='Delivery unconfirmed (worker interrupted if this persists).'; $j['attempts']++; self::save($id,$j);
                 try { $r=self::dispatch($j); } catch (\Throwable $e) { $r=API::error('Unexpected processing error; consult server logs.'); }
                 $j['code']=$r['code']; $j['result']=$r['message']; $j['fallback']=!empty($r['fallback']) || !empty($j['fallback']); $j['status']=self::result_status($r);
                 if (in_array($j['action'],['update','delete'],true) && $r['code']===0 && !empty($r['ambiguous'])) { $j['status']='unknown'; }
                 if ($j['status']==='failed' && !empty($r['retry']) && ($j['attempts']<5 || !empty($r['defer']))) { $j['status']='pending'; if (!empty($r['defer'])) { $j['attempts']--; } $j['due']=time()+max((int)($r['delay']??0),min(3600,60*2**$j['attempts'])); if (!empty($r['retry_provider'])) { $j['provider']=$r['retry_provider']; $j['manual']=true; } }
                 if ($j['status']!=='pending') { $j['finished']=time(); if (in_array($j['action'],['metadata','inspect'],true) && $j['status']==='accepted') { $j['details']=self::details($r['data']); } }
-                self::save($p->ID,$j);
+                self::save($id,$j);
             }
             // Bounded retention for terminal records. Pending and unknown requests are never pruned automatically.
-            foreach (self::query(['numberposts'=>20,'meta_query'=>[['key'=>'_lst_seo_status','value'=>['accepted','received','failed'],'compare'=>'IN'],['key'=>'_lst_seo_finished','value'=>time()-30*DAY_IN_SECONDS,'compare'=>'<','type'=>'NUMERIC']]]) as $p) { wp_delete_post($p->ID,true); } // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Retention cleanup is limited to terminal records of the plugin-private queue post type, at most 20 per worker run; pending and unknown records are excluded.
+            foreach (self::query(['numberposts'=>20,'meta_query'=>[['key'=>'_lst_seo_status','value'=>['accepted','received','failed'],'compare'=>'IN'],['key'=>'_lst_seo_finished','value'=>time()-30*DAY_IN_SECONDS,'compare'=>'<','type'=>'NUMERIC']]]) as $id) { $terminal=self::get($id); if (in_array($terminal['status']??'',['accepted','received','failed'],true) && (int)($terminal['finished']??0)>0 && (int)$terminal['finished']<time()-30*DAY_IN_SECONDS) { wp_delete_post($id,true); } } // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Retention cleanup is limited to terminal records of the plugin-private queue post type, at most 20 per worker run; pending and unknown records are excluded.
             if (count($jobs)===2) { self::schedule(15); } elseif (self::query(['numberposts'=>1,'meta_key'=>'_lst_seo_status','meta_value'=>'pending'])) { self::schedule(300); } // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- Check whether the plugin-private queue has any pending record to schedule another worker; at most one result, no found rows.
         } finally { delete_option(self::LOCK_TIME); delete_option(self::LOCK); }
     }

@@ -2,10 +2,21 @@
 namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class Reports {
+    public static function all_start(): string {
+        $today=gmdate('Y-m-d'); $manual=Config::get()['report_start'];
+        if (is_string($manual) && Config::date_ok($manual) && $manual<=$today) { return $manual; }
+        $types=array_keys(GEO::types());
+        if (!$types) { return $today; }
+        $query=new \WP_Query(['post_type'=>$types,'post_status'=>'publish','posts_per_page'=>1,'orderby'=>['date'=>'ASC','ID'=>'ASC'],'fields'=>'ids','no_found_rows'=>true,'ignore_sticky_posts'=>true,'update_post_meta_cache'=>false,'update_post_term_cache'=>false,'suppress_filters'=>false]);
+        $id=(int)($query->posts[0]??0); $post=$id?get_post($id):null;
+        if (!$post || $post->post_status!=='publish' || !in_array($post->post_type,$types,true)) { return $today; }
+        $date=substr($post->post_date,0,10);
+        return Config::date_ok($date) && $date<=$today?$date:$today;
+    }
     public static function range(string $period,string $start='',string $end=''): array {
         $today=new \DateTimeImmutable('today',new \DateTimeZone('UTC')); $end=$period==='custom'?$end:$today->format('Y-m-d');
         $days=['daily'=>0,'weekly'=>6,'monthly'=>29,'quarterly'=>89,'yearly'=>364];
-        $start=$period==='custom'?$start:($period==='all'?Config::get()['report_start']:$today->modify('-'.($days[$period]??29).' days')->format('Y-m-d'));
+        $start=$period==='custom'?$start:($period==='all'?self::all_start():$today->modify('-'.($days[$period]??29).' days')->format('Y-m-d'));
         if (!Config::date_ok($start) || !Config::date_ok($end) || $start>$end || $end>$today->format('Y-m-d')) { return []; } return [$start,$end];
     }
     public static function ga_metrics(): array { return ['activeUsers','totalUsers','sessions','screenPageViews','engagementRate','userEngagementDuration','keyEvents']; }

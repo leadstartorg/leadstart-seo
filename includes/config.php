@@ -3,8 +3,15 @@ namespace LST_SEO;
 if (!defined('ABSPATH')) { exit; }
 final class Config {
     const OPTION = 'lst_seo_settings';
-    public static function defaults(): array { return ['google_auto'=>[], 'indexnow_auto'=>[], 'google_limit'=>200,'indexnow'=>false,'bing_fallback'=>false,'index_key'=>'','key_path'=>'','gsc_property'=>'','ga_property'=>'','meta'=>false,'use_excerpt'=>true,'excerpt_types'=>null,'geo'=>false,'geo_types'=>['post','page'],'geo_limit'=>50,'geo_title'=>'','geo_description'=>'','geo_navigation'=>true,'geo_cache'=>true,'geo_bots'=>[],'schema'=>false,'schema_map'=>[], 'field_map'=>[], 'ai'=>false,'ai_provider'=>'','report_start'=>'2020-10-14','purge'=>false]; }
-    public static function get(): array { return array_replace(self::defaults(), (array)get_option(self::OPTION, [])); }
+    public static function defaults(): array { return ['google_auto'=>[], 'indexnow_auto'=>[], 'google_limit'=>200,'indexnow'=>false,'bing_fallback'=>false,'index_key'=>'','key_path'=>'','gsc_property'=>'','ga_property'=>'','meta'=>false,'use_excerpt'=>true,'excerpt_types'=>null,'geo'=>false,'geo_types'=>['post','page'],'geo_limit'=>50,'geo_title'=>'','geo_description'=>'','geo_navigation'=>true,'geo_cache'=>true,'geo_bots'=>[],'schema'=>false,'schema_map'=>[], 'field_map'=>[], 'ai'=>false,'ai_provider'=>'','ai_fallback'=>false,'report_start'=>'','report_start_manual'=>false,'purge'=>false]; }
+    public static function get(): array {
+        $stored=(array)get_option(self::OPTION, []);
+        $settings=array_replace(self::defaults(),$stored);
+        // The former default was indistinguishable from a saved copy of that default.
+        // Treat it as automatic unless explicitly saved as a manual override in this release.
+        if ($settings['report_start']==='2020-10-14' && empty($stored['report_start_manual'])) { $settings['report_start']=''; }
+        return $settings;
+    }
     public static function secret(string $name): string {
         $constant = 'LST_SEO_' . strtoupper($name);
         if (defined($constant)) { return is_string(constant($constant)) ? constant($constant) : ''; }
@@ -51,7 +58,7 @@ final class Config {
         $base=rtrim($h['path']??'','/'); $path=$p['path']??'/';
         if ($base!=='' && $path!==$base && !str_starts_with($path,$base.'/')) { return ''; }
         if (preg_match('~(?:^|/)(?:\.{1,2})(?:/|$)~',rawurldecode($path)) || preg_match('~/(?:wp-admin|wp-login\.php|wp-json)(?:/|$)~i',rawurldecode($path))) { return ''; }
-        $q=[]; parse_str($p['query']??'', $q); foreach (array_keys($q) as $k) { if (preg_match('/preview|nonce|rest_route|password|token|(?:^|_)key(?:_|$)|secret|credential|session|auth/i',(string)$k)) { return ''; } } if (preg_match('/[\x00-\x1f\x7f\\\\]/',rawurldecode($path))) { return ''; }
+        $q=[]; wp_parse_str($p['query']??'', $q); foreach (array_keys($q) as $k) { if (preg_match('/preview|nonce|rest_route|password|token|(?:^|_)key(?:_|$)|secret|credential|session|auth/i',(string)$k)) { return ''; } } if (preg_match('/[\x00-\x1f\x7f\\\\]/',rawurldecode($path))) { return ''; }
         return esc_url_raw($url,['http','https']);
     }
     public static function property_ok(string $p): bool { if ($p==='sc-domain:'.wp_parse_url(home_url('/'),PHP_URL_HOST)) { return true; } return rtrim($p,'/')===rtrim(home_url('/'),'/'); }
